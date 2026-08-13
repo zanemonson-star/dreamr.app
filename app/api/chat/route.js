@@ -1,8 +1,12 @@
 // This file runs ONLY on the server. Next.js never sends route handler
-// code to the browser, so process.env.ANTHROPIC_API_KEY is never exposed.
+// code to the browser, so process.env.BYTEZ_API_KEY is never exposed.
 export const runtime = 'nodejs';
 
-const MODEL = 'claude-sonnet-5'; // update if you want a different model
+// Bytez's free tier covers open models up to 7B params. Change this to
+// any model id listed at https://bytez.com/models — e.g. prefix with
+// "openai/" or "anthropic/" to use a closed-source provider instead
+// (billed pass-through, not covered by the free credits).
+const MODEL = 'Qwen/Qwen2.5-7B-Instruct';
 
 export async function POST(req) {
   let body;
@@ -17,35 +21,36 @@ export async function POST(req) {
     return Response.json({ error: { message: 'Request must include a messages array' } }, { status: 400 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.BYTEZ_API_KEY;
   if (!apiKey) {
-    // This means the env var isn't set on the server/host — check your
-    // deployment platform's environment variable settings.
     return Response.json(
-      { error: { message: 'Server misconfigured: ANTHROPIC_API_KEY is not set.' } },
+      { error: { message: 'Server misconfigured: BYTEZ_API_KEY is not set.' } },
       { status: 500 }
     );
   }
 
+  // Bytez's chat endpoint is OpenAI-compatible: system is just another
+  // message with role "system", placed first.
+  const fullMessages = system ? [{ role: 'system', content: system }, ...messages] : messages;
+
   let upstream;
   try {
-    upstream = await fetch('https://api.anthropic.com/v1/messages', {
+    upstream = await fetch('https://api.bytez.com/models/v2/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        'Authorization': apiKey,
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 1000,
-        system,
-        messages,
+        messages: fullMessages,
+        max_completion_tokens: 1000,
+        temperature: 0.7,
       }),
     });
   } catch (e) {
     return Response.json(
-      { error: { message: 'Could not reach the Anthropic API: ' + e.message } },
+      { error: { message: 'Could not reach the Bytez API: ' + e.message } },
       { status: 502 }
     );
   }
@@ -55,18 +60,21 @@ export async function POST(req) {
     data = await upstream.json();
   } catch (e) {
     return Response.json(
-      { error: { message: `Anthropic API returned a non-JSON response (status ${upstream.status})` } },
+      { error: { message: `Bytez API returned a non-JSON response (status ${upstream.status})` } },
       { status: 502 }
     );
   }
 
   if (!upstream.ok) {
-    // Pass the REAL upstream error straight through — this is what makes
-    // failures debuggable instead of a generic "API problem" message.
-    return Response.json({ error: data?.error || { message: `Upstream error (${upstream.status})` } }, {
-      status: upstream.status,
-    });
+    return Response.json(
+      { error: data?.error || { message: data?.message || `Upstream error (${upstream.status})` } },
+      { status: upstream.status }
+    );
   }
 
-  return Response.json(data);
+  const text = data?.choices?.[0]?.message?.content || '';
+
+  // Return in the SAME shape the frontend already expects (Anthropic-style
+  // { content: [{ text }] }) — so DreamrApp.jsx needs zero changes.
+  return Response.json({ content: [{ type: 'text', text }] });
 }
